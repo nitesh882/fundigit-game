@@ -1,0 +1,93 @@
+@import "tailwindcss";
+
+@source "../index.html";
+@source "./**/*.{js,ts,jsx,tsx}";
+
+@theme {
+  --color-gaming-dark: #0f2027;
+  --color-gaming-primary: #00ffff;
+  --color-gaming-secondary: #00ffff;
+  --font-orbitron: 'Orbitron', sans-serif;
+  --breakpoint-lg: 995px;
+}
+
+@layer base {
+  body {
+    background: radial-gradient(circle at top, #0f2027, #203a43, #2c5364);
+    @apply bg-gaming-dark text-white font-orbitron min-h-screen selection:bg-gaming-primary selection:text-black;
+  }
+
+  /* Smooth scrolling */
+  html {
+    scroll-behavior: smooth;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply px-6 py-3 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-500 text-white font-bold uppercase tracking-wider transition-all duration-300 hover:shadow-lg hover:shadow-cyan-500/50 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed inline-block text-center;
+  }
+
+  .btn-secondary {
+    @apply px-4 py-2 rounded-lg border border-cyan-400 text-cyan-300 font-bold uppercase tracking-wider transition-all duration-300 hover:bg-cyan-500/20 active:scale-95;
+  }
+
+  .input-field {
+    @apply w-full px-4 py-3 rounded-lg bg-slate-800/80 border border-slate-700 text-white placeholder-slate-400 focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/50 focus:outline-none transition-all text-center;
+  }
+
+  .card-container {
+    @apply bg-slate-900/80 backdrop-blur-md border border-cyan-500/30 rounded-2xl p-8 w-full max-w-md mx-auto transition-all duration-300;
+    box-shadow: 0 0 25px rgba(0, 255, 255, 0.1);
+  }
+
+  .card-container:hover {
+    box-shadow: 0 0 40px rgba(0, 255, 255, 0.2);
+    border-color: rgba(0, 255, 255, 0.4);
+  }
+
+  .nav-link {
+    @apply text-gray-300 hover:text-cyan-300 transition-colors duration-300 uppercase tracking-widest text-sm font-bold cursor-pointer;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.3);
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: rgba(0, 255, 255, 0.5);
+    border-radius: 10px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 255, 255, 0.8);
+  }
+  
+  .nav-link.active {
+    @apply text-gaming-primary border-b-2 border-gaming-primary;
+  }
+}
+
+/* Animations */
+@keyframes float {
+  0% {
+    transform: translateY(0px);
+  }
+
+  50% {
+    transform: translateY(-10px);
+  }
+
+  100% {
+    transform: translateY(0px);
+  }
+}
+
+.animate-float {
+  animation: float 6s ease-in-out infinite;
+}

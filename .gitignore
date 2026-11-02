@@ -1,0 +1,38 @@
+# ===== ROOT =====
+.env
+.env.local
+.env.*.local
+
+# ===== FRONTEND =====
+Frontend/node_modules/
+Frontend/dist/
+Frontend/.env
+Frontend/.env.local
+Frontend/.env.*.local
+Frontend/.DS_Store
+
+# ===== BACKEND =====
+Backend/target/
+Backend/.mvn/wrapper/maven-wrapper.jar
+Backend/*.log
+Backend/java-api.out.log
+Backend/java-api.err.log
+
+# ===== IDE =====
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+*.swp
+*.swo
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== MISC =====
+*.class
+*.jar
+!Backend/.mvn/wrapper/maven-wrapper.properties
