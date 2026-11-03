@@ -9,9 +9,14 @@ import javax.crypto.SecretKey;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Date;
+import java.time.Clock;
+import lombok.RequiredArgsConstructor;
 
 @Service
+@RequiredArgsConstructor
 public class JwtService {
+
+    private final Clock clock;
 
     @Value("${jwt.secret}")
     private String secret;
@@ -33,8 +38,8 @@ public class JwtService {
         return Jwts.builder()
                 .subject(username)
                 .claim("id", id)
-                .issuedAt(new Date())
-                .expiration(new Date(System.currentTimeMillis() + expiration))
+                .issuedAt(Date.from(clock.instant()))
+                .expiration(Date.from(clock.instant().plusMillis(expiration)))
                 .signWith(getSigningKey())
                 .compact();
     }
@@ -42,6 +47,7 @@ public class JwtService {
     public String extractUsername(String token) {
         return Jwts.parser()
                 .verifyWith(getSigningKey())
+                .clock(() -> Date.from(clock.instant()))
                 .build()
                 .parseSignedClaims(token)
                 .getPayload()
@@ -60,10 +66,11 @@ public class JwtService {
     private boolean isTokenExpired(String token) {
         return Jwts.parser()
                 .verifyWith(getSigningKey())
+                .clock(() -> Date.from(clock.instant()))
                 .build()
                 .parseSignedClaims(token)
                 .getPayload()
                 .getExpiration()
-                .before(new Date());
+                .before(Date.from(clock.instant()));
     }
 }

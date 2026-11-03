@@ -1,0 +1,51 @@
+name: Build and test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: Frontend/package-lock.json
+      - name: Backend verification
+        working-directory: Backend
+        run: bash ./mvnw --batch-mode verify
+      - name: Install frontend dependencies
+        working-directory: Frontend
+        run: npm ci
+      - name: Frontend lint, tests, and build
+        working-directory: Frontend
+        run: |
+          npm run lint
+          npm test
+          npm run build
+      - name: Install Chromium
+        working-directory: Frontend
+        run: npx playwright install --with-deps chromium
+      - name: Browser integration tests
+        working-directory: Frontend
+        run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: verification-artifacts
+          path: |
+            Frontend/output/
+            Backend/target/surefire-reports/
+          if-no-files-found: ignore

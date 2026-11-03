@@ -24,20 +24,28 @@ const parseResponse = async (response) => {
 };
 
 export const apiRequest = async (path, options = {}) => {
-  const headers = { ...(options.headers || {}) };
-  const hasBody = Boolean(options.body);
+  const { authenticated = false, ...requestOptions } = options;
+  const headers = { ...(requestOptions.headers || {}) };
+  const authorization = headers.Authorization || headers.authorization;
+  const requestToken = authorization?.startsWith("Bearer ") ? authorization.slice(7) : null;
+  const hasBody = Boolean(requestOptions.body);
   if (hasBody && !headers["Content-Type"] && !headers["content-type"]) {
     headers["Content-Type"] = "application/json";
   }
 
   const response = await fetch(buildUrl(path), {
-    ...options,
+    ...requestOptions,
     headers,
   });
 
   const { data, rawText } = await parseResponse(response);
 
   if (!response.ok) {
+    if (response.status === 401 && (authenticated || authorization) && localStorage.getItem("token") === requestToken) {
+      localStorage.removeItem("token");
+      localStorage.removeItem("user");
+      window.dispatchEvent(new Event("auth:expired"));
+    }
     const message =
       data && typeof data === "object" && "message" in data
         ? data.message
@@ -56,3 +64,10 @@ export const apiRequest = async (path, options = {}) => {
 
 export const authHeader = (token) =>
   token ? { Authorization: `Bearer ${token}` } : {};
+
+export const authRequest = (path, options = {}) =>
+  apiRequest(path, {
+    ...options,
+    authenticated: true,
+    headers: { ...authHeader(localStorage.getItem("token")), ...options.headers },
+  });

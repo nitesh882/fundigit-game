@@ -1,6 +1,7 @@
 package com.demo.authapp.config;
 
 import com.demo.authapp.service.JwtService;
+import com.demo.authapp.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -20,6 +21,7 @@ import java.util.Collections;
 public class JwtFilter extends OncePerRequestFilter {
 
     private final JwtService jwtService;
+    private final UserRepository users;
 
     @Override
     protected void doFilterInternal(HttpServletRequest request,
@@ -49,7 +51,7 @@ public class JwtFilter extends OncePerRequestFilter {
         if (username != null &&
                 SecurityContextHolder.getContext().getAuthentication() == null) {
 
-            if (jwtService.isTokenValid(jwt, username)) {
+            if (jwtService.isTokenValid(jwt, username) && users.findByEmail(username).isPresent()) {
                 UsernamePasswordAuthenticationToken authToken =
                         new UsernamePasswordAuthenticationToken(
                                 username,
@@ -58,6 +60,11 @@ public class JwtFilter extends OncePerRequestFilter {
                         );
 
                 SecurityContextHolder.getContext().setAuthentication(authToken);
+            } else {
+                response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+                response.setContentType("application/json");
+                response.getWriter().write("{\"message\":\"Please sign in again.\"}");
+                return;
             }
         }
 

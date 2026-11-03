@@ -13,6 +13,7 @@
 
 @layer base {
   body {
+    margin: 0;
     background: radial-gradient(circle at top, #0f2027, #203a43, #2c5364);
     @apply bg-gaming-dark text-white font-orbitron min-h-screen selection:bg-gaming-primary selection:text-black;
   }
@@ -20,6 +21,25 @@
   /* Smooth scrolling */
   html {
     scroll-behavior: smooth;
+  }
+
+  :focus-visible {
+    outline: 3px solid #67e8f9;
+    outline-offset: 4px;
+  }
+
+  button:not(:disabled), a {
+    cursor: pointer;
+    touch-action: manipulation;
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+
+  input, button, a {
+    -webkit-tap-highlight-color: transparent;
   }
 }
 
@@ -90,4 +110,13 @@
 
 .animate-float {
   animation: float 6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

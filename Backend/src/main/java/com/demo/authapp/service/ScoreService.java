@@ -1,49 +1,31 @@
 package com.demo.authapp.service;
-
-import com.demo.authapp.model.Score;
-import com.demo.authapp.model.User;
+import com.demo.authapp.config.ApiException;
+import com.demo.authapp.dto.ScoreView;
 import com.demo.authapp.repository.ScoreRepository;
-import com.demo.authapp.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
-
-import java.time.Instant;
+import org.springframework.transaction.annotation.Transactional;
 import java.util.List;
 
 @Service
 @RequiredArgsConstructor
 public class ScoreService {
-
-    private final ScoreRepository scoreRepository;
-    private final UserRepository userRepository;
-
-    public Score saveScore(String email, int points, String mode, String difficulty) {
-        User user = userRepository.findByEmail(email)
-                .orElseThrow(() -> new RuntimeException("User not found"));
-
-        Score score = Score.builder()
-                .user(user)
-                .name(user.getUsername())
-                .score(points)
-                .mode(mode != null ? mode : "add")
-                .difficulty(difficulty != null ? difficulty : "medium")
-                .playedAt(Instant.now())
-                .build();
-
-        return scoreRepository.save(score);
+    private final ScoreRepository scores;
+    private final GameService game;
+    @Transactional(readOnly = true)
+    public List<ScoreView> getTopScores(String mode, String difficulty, int limit) {
+        validateLimit(limit);
+        return scores.findByModeAndDifficultyAndStatusOrderByScoreDescPlayedAtAscIdAsc(game.mode(mode), game.level(difficulty), "COMPLETED", PageRequest.of(0, limit))
+                .stream().map(ScoreView::from).toList();
     }
-
-    public List<Score> getTopScores(String mode, String difficulty, int limit) {
-        String resolvedMode = (mode == null || mode.isBlank()) ? "add" : mode;
-        String resolvedDifficulty = (difficulty == null || difficulty.isBlank()) ? "medium" : difficulty;
-        return scoreRepository.findByModeAndDifficultyOrderByScoreDesc(resolvedMode, resolvedDifficulty, PageRequest.of(0, limit));
+    @Transactional(readOnly = true)
+    public List<ScoreView> getUserHistory(String email, int limit) {
+        validateLimit(limit);
+        return scores.findByUser_EmailOrderByPlayedAtDescIdDesc(email, PageRequest.of(0, limit)).stream().map(ScoreView::from).toList();
     }
-
-    public List<Score> getUserHistory(String email, int limit) {
-        User user = userRepository.findByEmail(email)
-                .orElseThrow(() -> new RuntimeException("User not found"));
-
-        return scoreRepository.findByUser_IdOrderByPlayedAtDesc(user.getId(), PageRequest.of(0, limit));
+    private void validateLimit(int limit) {
+        if (limit < 1 || limit > 100) throw new ApiException(HttpStatus.BAD_REQUEST, "Limit must be between 1 and 100.");
     }
 }

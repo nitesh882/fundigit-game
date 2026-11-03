@@ -1,745 +1,355 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
-import { apiRequest, authHeader } from "@/lib/apiClient";
-import { generateFractionQuestion, simplifyFraction } from "@/utils/gameUtils";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { useAuth } from "@/context/AuthContext";
+import { authRequest } from "@/lib/apiClient";
+import { MODE_LABEL, isValidGame, validateAnswer } from "@/utils/gameUtils";
 
-const TOTAL_QUESTIONS = 10;
+const newRequestId = () => crypto.randomUUID();
+const freshRecord = () => ({ requestId: newRequestId(), sessionId: null, pending: null });
+const emptyMarks = (question, mode) => Array.from({ length: mode === "add" || mode === "sub" ? question?.questionColumns ?? 0 : 0 }, () => "");
+const readRecord = (key) => {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(key));
+    return saved?.requestId ? saved : freshRecord();
+  } catch {
+    return freshRecord();
+  }
+};
 
-const GameBoard = () => {
+export default function GameBoard() {
   const { mode = "add", level = "medium" } = useParams();
+  const { user } = useAuth();
+  if (!isValidGame(mode, level)) return (
+    <main className="min-h-screen pt-28 px-4 text-center">
+      <h1 className="text-3xl text-cyan-300 font-bold">Choose a valid game</h1>
+      <Link to="/game" className="btn-primary mt-6">Choose Game Mode</Link>
+    </main>
+  );
+  return <GameRound key={`${user?.id}:${mode}:${level}`} userId={user?.id ?? "player"} mode={mode} level={level} />;
+}
+
+function GameRound({ mode, level, userId }) {
   const navigate = useNavigate();
-
-  const isScoreSavedRef = useRef(false);
-  const timeoutHandledRef = useRef(false);
-  const isSubmittingRef = useRef(false);
-  const isLoadingQuestionRef = useRef(false);
-
-  const [num1, setNum1] = useState(0);
-  const [num2, setNum2] = useState(0);
-  const [answerDigits, setAnswerDigits] = useState([]);
-  const [fractionQ, setFractionQ] = useState(null);
-  const [fracNumInput, setFracNumInput] = useState("");
-  const [fracDenInput, setFracDenInput] = useState("");
-  const [carryRequiredMap, setCarryRequiredMap] = useState([]);
+  const storageKey = `viemit:game:${userId}:${mode}:${level}`;
+  const [initialRecord] = useState(() => readRecord(storageKey));
+  const recordRef = useRef(initialRecord);
+  const sessionRef = useRef(null);
+  const controllerRef = useRef(null);
+  const generationRef = useRef(0);
+  const retryRef = useRef(null);
+  const timedOutRef = useRef(null);
+  const answerRef = useRef(null);
+  const numeratorRef = useRef(null);
+  const denominatorRef = useRef(null);
+  const [session, setSession] = useState(null);
+  const [phase, setPhase] = useState("loading");
+  const [error, setError] = useState("");
+  const [formError, setFormError] = useState("");
+  const [feedback, setFeedback] = useState("");
+  const [answer, setAnswer] = useState("");
+  const [numerator, setNumerator] = useState("");
+  const [denominator, setDenominator] = useState("");
   const [carryMap, setCarryMap] = useState([]);
-  const [activeInput, setActiveInput] = useState("answer");
-  const [selectedCarryIndex, setSelectedCarryIndex] = useState(null);
-  const [score, setScore] = useState(0);
-  const [questionCount, setQuestionCount] = useState(1);
-  const [timer, setTimer] = useState(null);
-  const [gameOver, setGameOver] = useState(false);
-  const [saveError, setSaveError] = useState("");
-  const [questionError, setQuestionError] = useState("");
-  const [operatorSymbol, setOperatorSymbol] = useState("?");
-  const [feedback, setFeedback] = useState(null);
+  const [activeInput, setActiveInput] = useState(mode === "fraction" ? "num" : "answer");
+  const [clock, setClock] = useState(() => ({ now: Date.now(), offset: 0 }));
 
-  const showCarryBorrow = mode === "add" || mode === "sub";
+  const saveRecord = useCallback((record) => {
+    recordRef.current = record;
+    sessionStorage.setItem(storageKey, JSON.stringify(record));
+  }, [storageKey]);
 
-  // Stable generateQuestion that only depends on mode and level
-  const generateQuestion = useCallback(async () => {
-    if (isLoadingQuestionRef.current) return;
-    isLoadingQuestionRef.current = true;
+  const acceptSession = useCallback((next) => {
+    if (!next?.id || !["ACTIVE", "COMPLETED", "ABANDONED"].includes(next.status)) throw new Error("The server returned an invalid game response.");
+    const changedQuestion = sessionRef.current?.question?.id !== next.question?.id;
+    sessionRef.current = next;
+    setSession(next);
+    setClock({ now: Date.now(), offset: Date.parse(next.serverTime) - Date.now() || 0 });
+    // Keep only active rounds resumable. A later visit to a completed mode should
+    // start a new round instead of reopening an old result screen.
+    saveRecord(next.status === "ACTIVE"
+      ? { ...recordRef.current, sessionId: next.id, pending: null }
+      : freshRecord());
+    if (changedQuestion) {
+      setAnswer("");
+      setNumerator("");
+      setDenominator("");
+      setCarryMap(emptyMarks(next.question, mode));
+      setActiveInput(mode === "fraction" ? "num" : "answer");
+      setFormError("");
+      timedOutRef.current = null;
+    }
+    setPhase(next.status === "ACTIVE" ? "ready" : next.status.toLowerCase());
+  }, [mode, saveRecord]);
 
+  const runOperation = useCallback(async (operation) => {
+    if (controllerRef.current) return;
+    const controller = new AbortController();
+    const generation = generationRef.current;
+    controllerRef.current = controller;
+    retryRef.current = operation;
+    setError("");
+    setFormError("");
+    setPhase(operation.kind === "answer" ? "submitting" : operation.kind === "end" ? "ending" : "loading");
+    if (operation.kind === "answer" || operation.kind === "end") saveRecord({ ...recordRef.current, pending: operation });
     try {
-      setQuestionError("");
-      timeoutHandledRef.current = false;
-
-      if (mode === "fraction") {
-        const q = generateFractionQuestion(level, "add");
-        setFractionQ(q);
-        setFracNumInput("");
-        setFracDenInput("");
-        setOperatorSymbol(q.operator || "+");
-        setCarryRequiredMap([]);
-        setCarryMap([]);
-        setAnswerDigits([]);
-        setActiveInput("num");
-        setSelectedCarryIndex(null);
-        setTimer(q.timeLimitSeconds || 30);
+      let response;
+      const options = { signal: controller.signal };
+      if (operation.kind === "load") {
+        try {
+          response = await authRequest(`/api/game/sessions/${operation.sessionId}`, options);
+        } catch (failure) {
+          if (failure.status !== 404) throw failure;
+          response = await authRequest("/api/game/sessions", { ...options, method: "POST", body: JSON.stringify({ mode, level, requestId: recordRef.current.requestId }) });
+        }
+      } else if (operation.kind === "start") {
+        saveRecord(recordRef.current);
+        response = await authRequest("/api/game/sessions", { ...options, method: "POST", body: JSON.stringify({ mode, level, requestId: operation.requestId }) });
       } else {
-        const { data } = await apiRequest(
-          `/api/game/question?mode=${encodeURIComponent(
-            mode
-          )}&level=${encodeURIComponent(level)}`
-        );
-
-        const requiredMap = Array.isArray(data?.carryRequiredMap)
-          ? data.carryRequiredMap
-          : [];
-        const answerLength =
-          typeof data?.answerLength === "number" && data.answerLength > 0
-            ? data.answerLength
-            : 1;
-        const timeLimitSeconds =
-          typeof data?.timeLimitSeconds === "number" && data.timeLimitSeconds > 0
-            ? data.timeLimitSeconds
-            : 25;
-
-        setNum1(data?.a ?? 0);
-        setNum2(data?.b ?? 0);
-        setOperatorSymbol(data?.operatorSymbol ?? "?");
-        setAnswerDigits(Array(answerLength).fill(""));
-        setCarryRequiredMap(requiredMap);
-        setCarryMap(requiredMap.map((required) => (required ? "" : null)));
-        setActiveInput("answer");
-        setSelectedCarryIndex(null);
-        setTimer(timeLimitSeconds);
+        response = await authRequest(`/api/game/sessions/${operation.sessionId}/${operation.kind === "answer" ? "answers" : "end"}`, {
+          ...options, method: "POST", ...(operation.body ? { body: JSON.stringify(operation.body) } : {}),
+        });
       }
-    } catch (error) {
-      console.error("Unable to load question:", error);
-      setQuestionError("Unable to load question. Please check backend connection.");
+      if (controller.signal.aborted || generation !== generationRef.current) return;
+      const next = operation.kind === "answer" ? response.data.session : response.data;
+      acceptSession(next);
+      if (operation.kind === "answer") {
+        const result = response.data.result;
+        setFeedback(result.timedOut ? "Time's up! (0 pts)" : operation.body.action === "skip" ? "Question skipped (0 pts)" : result.answerCorrect ? `Correct! +${result.earnedPoints} pts${result.earnedPoints === 8 ? " — add carry/borrow marks for full credit." : ""}` : "Incorrect (0 pts). Keep trying!");
+      }
+      retryRef.current = null;
+    } catch (failure) {
+      if (controller.signal.aborted || generation !== generationRef.current) return;
+      if (failure.status === 409 && operation.kind === "answer") {
+        const recovery = { kind: "load", sessionId: operation.sessionId };
+        retryRef.current = recovery;
+        saveRecord({ ...recordRef.current, pending: null });
+        try {
+          const { data } = await authRequest(`/api/game/sessions/${operation.sessionId}`, { signal: controller.signal });
+          if (controller.signal.aborted || generation !== generationRef.current) return;
+          acceptSession(data);
+          setError("This round changed in another tab. The latest game state has been restored.");
+          retryRef.current = null;
+        } catch (recoveryFailure) {
+          if (controller.signal.aborted || generation !== generationRef.current) return;
+          setPhase("error");
+          setError(recoveryFailure.message || "Unable to recover the latest game state. Retry the request.");
+        }
+        return;
+      }
+      const rejected = operation.kind === "answer" && failure.status >= 400 && failure.status < 500 && sessionRef.current;
+      if (rejected) {
+        saveRecord({ ...recordRef.current, pending: null });
+        retryRef.current = null;
+      }
+      setPhase(rejected ? "ready" : "error");
+      setError(failure.status ? failure.message : "Connection interrupted. Retry the request to recover this round without losing points.");
     } finally {
-      isLoadingQuestionRef.current = false;
+      if (controllerRef.current === controller) controllerRef.current = null;
     }
-  }, [level, mode]);
+  }, [acceptSession, level, mode, saveRecord]);
 
-  const saveScore = useCallback(
-    async (finalScore) => {
-      if (isScoreSavedRef.current) return;
-      isScoreSavedRef.current = true;
-
-      const token = localStorage.getItem("token");
-      if (!token) return;
-
-      try {
-        setSaveError("");
-        await apiRequest("/api/score", {
-          method: "POST",
-          headers: {
-            ...authHeader(token),
-          },
-          body: JSON.stringify({
-            score: finalScore,
-            mode,
-            difficulty: level,
-          }),
-        });
-      } catch (error) {
-        console.error("Unable to save score:", error);
-        setSaveError("Score sync failed. Please check backend connection.");
-      }
-    },
-    [level, mode]
-  );
-
-  const finalizeGame = useCallback(
-    (finalScore) => {
-      setGameOver(true);
-      setTimer(null);
-      void saveScore(finalScore);
-    },
-    [saveScore]
-  );
-
-  const handleSubmit = useCallback(
-    async (timeout = false) => {
-      if (gameOver || isSubmittingRef.current) return;
-      isSubmittingRef.current = true;
-
-      let earnedPoints = 0;
-      let isCorrect = false;
-
-      if (mode === "fraction") {
-        try {
-          const n = parseInt(fracNumInput || "0", 10);
-          const d = parseInt(fracDenInput || "1", 10) || 1;
-          const submitted = simplifyFraction(n, d);
-          const expected = fractionQ?.answer || null;
-          if (!timeout && expected && submitted.n === expected.n && submitted.d === expected.d) {
-            earnedPoints = 10;
-            isCorrect = true;
-          }
-        } catch {
-          earnedPoints = 0;
-        }
-      } else {
-        const answerText = answerDigits.join("");
-        try {
-          const { data } = await apiRequest("/api/game/submit", {
-            method: "POST",
-            body: JSON.stringify({
-              a: num1,
-              b: num2,
-              mode,
-              level,
-              answerText,
-              carryMap,
-              timeout,
-            }),
-          });
-          earnedPoints = typeof data?.earnedPoints === "number" ? data.earnedPoints : 0;
-          isCorrect = Boolean(data?.answerCorrect);
-        } catch (error) {
-          console.error("Unable to submit answer:", error);
-          earnedPoints = 0;
-        }
-      }
-
-      if (timeout) {
-        setFeedback({ text: "⏰ Time's up! (0 pts)", type: "warning" });
-      } else if (earnedPoints > 0 || isCorrect) {
-        setFeedback({ text: `+${earnedPoints} Correct! 🎉`, type: "success" });
-      } else {
-        setFeedback({ text: "❌ Incorrect", type: "error" });
-      }
-
-      setTimeout(() => setFeedback(null), 1500);
-
-      const nextScore = score + earnedPoints;
-      setScore(nextScore);
-
-      if (questionCount >= TOTAL_QUESTIONS) {
-        finalizeGame(nextScore);
-        isSubmittingRef.current = false;
-        return;
-      }
-
-      setQuestionCount((prev) => prev + 1);
-      await generateQuestion();
-      isSubmittingRef.current = false;
-    },
-    [
-      answerDigits,
-      carryMap,
-      finalizeGame,
-      fracDenInput,
-      fracNumInput,
-      fractionQ,
-      gameOver,
-      generateQuestion,
-      level,
-      mode,
-      num1,
-      num2,
-      questionCount,
-      score,
-    ]
-  );
-
-  const startFreshGame = useCallback(() => {
-    isScoreSavedRef.current = false;
-    timeoutHandledRef.current = false;
-    isSubmittingRef.current = false;
-    setSaveError("");
-    setScore(0);
-    setQuestionCount(1);
-    setGameOver(false);
-    setFeedback(null);
-    void generateQuestion();
-  }, [generateQuestion]);
-
-  const handleNext = useCallback(() => {
-    if (gameOver || isSubmittingRef.current) return;
-
-    if (questionCount >= TOTAL_QUESTIONS) {
-      finalizeGame(score);
-      return;
-    }
-
-    setQuestionCount((prev) => prev + 1);
-    void generateQuestion();
-  }, [finalizeGame, gameOver, generateQuestion, questionCount, score]);
-
-  const handleDigit = useCallback(
-    (digit) => {
-      const d = String(digit);
-      if (mode === "fraction") {
-        if (activeInput === "num") {
-          setFracNumInput((s) => (s.length < 4 ? (s === "0" ? d : s + d) : s));
-        } else {
-          setFracDenInput((s) => (s.length < 4 ? (s === "0" ? d : s + d) : s));
-        }
-        return;
-      }
-
-      if (
-        activeInput === "carry" &&
-        selectedCarryIndex !== null &&
-        carryRequiredMap[selectedCarryIndex]
-      ) {
-        const normalizedCarry = d === "0" ? "0" : "1";
-        setCarryMap((prev) => {
-          const next = [...prev];
-          next[selectedCarryIndex] = normalizedCarry;
-          return next;
-        });
-        return;
-      }
-
-      // Enter digits left-to-right into the answer boxes
-      setAnswerDigits((prev) => {
-        let insertIndex = prev.findIndex((val) => val === "");
-        if (insertIndex === -1) return prev;
-
-        const next = [...prev];
-        next[insertIndex] = d;
-        return next;
-      });
-
-      setActiveInput("answer");
-      setSelectedCarryIndex(null);
-    },
-    [activeInput, carryRequiredMap, mode, selectedCarryIndex]
-  );
-
-  const handleDelete = useCallback(() => {
-    if (mode === "fraction") {
-      if (activeInput === "num") setFracNumInput((s) => s.slice(0, -1));
-      else setFracDenInput((s) => s.slice(0, -1));
-      return;
-    }
-
-    if (
-      activeInput === "carry" &&
-      selectedCarryIndex !== null &&
-      carryRequiredMap[selectedCarryIndex]
-    ) {
-      setCarryMap((prev) => {
-        const next = [...prev];
-        next[selectedCarryIndex] = "";
-        return next;
-      });
-      return;
-    }
-
-    // Delete the rightmost filled digit
-    setAnswerDigits((prev) => {
-      let removeIndex = -1;
-      for (let i = prev.length - 1; i >= 0; i -= 1) {
-        if (prev[i] !== "") {
-          removeIndex = i;
-          break;
-        }
-      }
-
-      if (removeIndex === -1) return prev;
-
-      const next = [...prev];
-      next[removeIndex] = "";
-      return next;
+  useEffect(() => {
+    const generation = generationRef.current;
+    // Defer startup so React StrictMode cleanup can cancel the first effect safely.
+    Promise.resolve().then(() => {
+      if (generation !== generationRef.current) return;
+      const record = recordRef.current;
+      void runOperation(record.pending || (record.sessionId ? { kind: "load", sessionId: record.sessionId } : { kind: "start", requestId: record.requestId }));
     });
+    return () => {
+      generationRef.current += 1;
+      controllerRef.current?.abort();
+      controllerRef.current = null;
+    };
+  }, [runOperation]);
 
-    setActiveInput("answer");
-    setSelectedCarryIndex(null);
-  }, [activeInput, carryRequiredMap, mode, selectedCarryIndex]);
+  const question = session?.question;
+  const remaining = question ? Math.max(0, Math.ceil((Date.parse(question.expiresAt) - clock.now - clock.offset) / 1000)) : 0;
+  const editable = phase === "ready" && remaining > 0;
 
-  const handleClear = useCallback(() => {
-    if (mode === "fraction") {
-      setFracNumInput("");
-      setFracDenInput("");
-      setActiveInput("num");
-      return;
+  useEffect(() => {
+    if (session?.status !== "ACTIVE") return undefined;
+    const interval = setInterval(() => setClock((current) => ({ ...current, now: Date.now() })), 200);
+    return () => clearInterval(interval);
+  }, [session?.status]);
+
+  useEffect(() => {
+    if (phase !== "ready" || remaining > 0 || !question || timedOutRef.current === question.id) return undefined;
+    const timeout = setTimeout(() => {
+      timedOutRef.current = question.id;
+      void runOperation({ kind: "answer", sessionId: session.id, body: { questionId: question.id, answerText: "", carryMap: [], action: "timeout" } });
+    }, 0);
+    return () => clearTimeout(timeout);
+  }, [phase, question, remaining, runOperation, session?.id]);
+
+  useEffect(() => {
+    if (phase === "ready") (mode === "fraction" ? numeratorRef : answerRef).current?.focus();
+  }, [mode, question?.id, phase]);
+
+  const clearInput = useCallback(() => {
+    if (!editable) return;
+    setAnswer(""); setNumerator(""); setDenominator("");
+    setCarryMap(emptyMarks(question, mode));
+    setActiveInput(mode === "fraction" ? "num" : "answer");
+    setFormError("");
+  }, [editable, mode, question]);
+
+  const enterDigit = useCallback((digit) => {
+    if (!editable) return;
+    const text = String(digit);
+    setFormError("");
+    if (activeInput.startsWith("carry:")) {
+      const index = Number(activeInput.split(":")[1]);
+      if (digit !== 0 && digit !== 1) return;
+      setCarryMap((current) => current.map((entry, position) => position === index ? text : entry));
+    } else {
+      const update = (current) => current.length < 6 ? current + text : current;
+      if (activeInput === "num") setNumerator(update);
+      else if (activeInput === "den") setDenominator(update);
+      else setAnswer(update);
     }
+  }, [activeInput, editable]);
 
-    setAnswerDigits((prev) => prev.map(() => ""));
-    setCarryMap(carryRequiredMap.map((required) => (required ? "" : null)));
-    setActiveInput("answer");
-    setSelectedCarryIndex(null);
-  }, [carryRequiredMap, mode]);
+  const deleteDigit = useCallback(() => {
+    if (!editable) return;
+    if (activeInput.startsWith("carry:")) {
+      const index = Number(activeInput.split(":")[1]);
+      setCarryMap((current) => current.map((entry, position) => position === index ? "" : entry));
+    } else if (activeInput === "num") setNumerator((current) => current.slice(0, -1));
+    else if (activeInput === "den") setDenominator((current) => current.slice(0, -1));
+    else setAnswer((current) => current.slice(0, -1));
+  }, [activeInput, editable]);
 
-  // Start fresh game ONCE on mount or when mode/level change
+  const submit = useCallback((action = "answer") => {
+    if (phase !== "ready" || !question) return;
+    if (action === "answer") {
+      const validation = validateAnswer(mode, answer, numerator, denominator);
+      if (validation) { setFormError(validation); return; }
+    }
+    void runOperation({ kind: "answer", sessionId: session.id, body: { questionId: question.id, answerText: action === "answer" ? mode === "fraction" ? `${numerator}/${denominator}` : answer : "", carryMap, action } });
+  }, [answer, carryMap, denominator, mode, numerator, phase, question, runOperation, session]);
+
   useEffect(() => {
-    startFreshGame();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, level]);
-
-  // Timer countdown: ticks down every second only when timer > 0
-  useEffect(() => {
-    if (gameOver || timer === null || timer <= 0) return;
-
-    const intervalId = setInterval(() => {
-      setTimer((prev) => (prev !== null && prev > 0 ? prev - 1 : 0));
-    }, 1000);
-
-    return () => clearInterval(intervalId);
-  }, [gameOver, timer]);
-
-  // Timeout handler: fires when timer reaches 0
-  useEffect(() => {
-    if (gameOver || timer === null || timer > 0 || timeoutHandledRef.current) return;
-    timeoutHandledRef.current = true;
-    void handleSubmit(true);
-  }, [gameOver, handleSubmit, timer]);
-
-  // Keyboard handlers: digits, Enter, Backspace, Escape
-  useEffect(() => {
-    const onKey = (e) => {
-      if (gameOver) return;
-      if (/^[0-9]$/.test(e.key)) {
-        handleDigit(Number(e.key));
-      } else if (e.key === "Enter") {
-        void handleSubmit(false);
-      } else if (e.key === "Backspace") {
-        handleDelete();
-      } else if (e.key === "Escape") {
-        handleClear();
-      }
+    const onKey = (event) => {
+      if (!editable || event.ctrlKey || event.metaKey || event.altKey) return;
+      const nativeInput = /INPUT|TEXTAREA|SELECT/.test(event.target.tagName) || event.target.isContentEditable;
+      if (event.key === "Escape") { event.preventDefault(); clearInput(); }
+      else if (!nativeInput && /^\d$/.test(event.key)) { event.preventDefault(); enterDigit(Number(event.key)); }
+      else if (!nativeInput && event.key === "Backspace") { event.preventDefault(); deleteDigit(); }
+      else if (!nativeInput && event.target.tagName !== "BUTTON" && event.key === "Enter" && !event.repeat) { event.preventDefault(); submit(); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [gameOver, handleDigit, handleSubmit, handleDelete, handleClear]);
+  }, [clearInput, deleteDigit, editable, enterDigit, submit]);
 
-  // UI for game over
-  if (gameOver) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-black to-slate-900 p-4 text-white">
-        <div className="w-full max-w-md rounded-2xl border border-cyan-500/40 bg-slate-900/90 p-8 text-center shadow-[0_20px_50px_rgba(0,0,0,0.45)]">
-          <div className="mb-6 text-6xl animate-bounce">🎉</div>
-          <h1 className="mb-4 text-4xl font-bold text-cyan-300">Game Complete!</h1>
-          <div className="mb-6 bg-gradient-to-r from-cyan-900/30 to-blue-900/30 border border-cyan-500/30 rounded-lg p-6">
-            <p className="text-gray-400 mb-2">Final Score</p>
-            <p className="text-5xl font-bold bg-gradient-to-r from-cyan-400 to-blue-400 text-transparent bg-clip-text">
-              {score}
-            </p>
-          </div>
-          {saveError && (
-            <div className="p-3 mb-4 rounded-lg bg-yellow-500/20 border border-yellow-500 text-yellow-300 text-sm">
-              ⚠️ {saveError}
-            </div>
-          )}
-          <div className="grid gap-3">
-            <button
-              type="button"
-              onClick={startFreshGame}
-              className="rounded-lg bg-gradient-to-r from-cyan-500 to-blue-500 px-4 py-3 font-bold text-slate-950 transition-all duration-200 hover:-translate-y-1 hover:shadow-[0_8px_26px_rgba(34,211,238,0.4)]"
-            >
-              🔄 Play Again
-            </button>
-            <button
-              type="button"
-              onClick={() => navigate("/game")}
-              className="rounded-lg border border-cyan-400/60 px-4 py-3 font-bold text-cyan-100 transition-all duration-200 hover:-translate-y-0.5 hover:bg-cyan-500/15"
-            >
-              🎮 Change Mode
-            </button>
-            <button
-              type="button"
-              onClick={() => navigate("/leaderboard", { state: { mode, difficulty: level } })}
-              className="rounded-lg border border-purple-500/60 px-4 py-3 font-bold text-purple-200 transition-all duration-200 hover:-translate-y-0.5 hover:bg-purple-500/15"
-            >
-              🏆 View Leaderboard
-            </button>
-          </div>
+  useEffect(() => {
+    if (!import.meta.env.DEV) return undefined;
+    window.render_game_to_text = () => JSON.stringify({ phase, status: session?.status, sessionId: session?.id, mode, level, question, score: session?.score ?? 0, answeredQuestions: session?.answeredQuestions ?? 0, answerText: mode === "fraction" ? `${numerator}/${denominator}` : answer, carryMap });
+    return () => { delete window.render_game_to_text; };
+  }, [answer, carryMap, denominator, level, mode, numerator, phase, question, session]);
+
+  const playAgain = () => {
+    if (controllerRef.current) return;
+    const record = freshRecord();
+    saveRecord(record);
+    setFeedback("");
+    void runOperation({ kind: "start", requestId: record.requestId });
+  };
+  const inputChange = (setter) => (event) => {
+    if (/^\d{0,6}$/.test(event.target.value)) { setter(event.target.value); setFormError(""); }
+  };
+
+  if (session && ["completed", "abandoned"].includes(phase)) return (
+    <main className="min-h-screen flex items-center justify-center pt-24 pb-10 px-4">
+      <div className="card-container text-center space-y-6">
+        <div aria-hidden="true" className="text-5xl">{phase === "completed" ? "🏆" : "🎮"}</div>
+        <h1 className="text-3xl font-bold text-cyan-300">{phase === "completed" ? "Game Complete!" : "Game Ended"}</h1>
+        <p className="text-slate-300">{session.answeredQuestions} of {session.totalQuestions} questions played</p>
+        <p className="text-4xl font-bold text-cyan-300">Score: {session.score}</p>
+        <p className="text-sm text-slate-300">{phase === "completed" ? "Saved to your history and leaderboard." : "Saved as unfinished in your history. Complete all 10 questions to enter the leaderboard."}</p>
+        <div className="grid gap-3">
+          <button type="button" onClick={playAgain} className="btn-primary">Play Again</button>
+          <button type="button" onClick={() => navigate("/game")} className="btn-secondary">Change Mode</button>
+          <button type="button" onClick={() => navigate("/leaderboard", { state: { mode, difficulty: level, tab: phase === "abandoned" ? "history" : "top" } })} className="btn-secondary">{phase === "abandoned" ? "View History" : "View Leaderboard"}</button>
         </div>
       </div>
-    );
-  }
+    </main>
+  );
 
-  const questionColumns = Math.max(String(num1).length, String(num2).length);
-  const boardColumns = Math.max(questionColumns, answerDigits.length);
-  const totalColumns = boardColumns + 1; // extra column for operator symbol
-  const carryOffset = Math.max(0, boardColumns - questionColumns);
-  const answerOffset = Math.max(0, boardColumns - answerDigits.length);
-
-  const topDigits = String(num1).padStart(boardColumns, " ").split("");
-  const bottomDigits = String(num2).padStart(boardColumns, " ").split("");
-
-  const progressPercentage = (questionCount / TOTAL_QUESTIONS) * 100;
-  const currentTimer = timer ?? 0;
-  const isTimeCritical = currentTimer <= 5;
-  const isTimeWarning = currentTimer <= 10;
+  const columns = question?.questionColumns ?? 1;
+  const grid = { gridTemplateColumns: `repeat(${columns + 1}, minmax(0, 1fr))` };
+  const digits = (value) => String(value).padStart(columns, " ").split("");
+  const inputClass = "w-full min-w-0 rounded-lg border-2 border-cyan-500/50 bg-slate-800 px-3 py-3 text-center font-mono text-2xl font-bold text-white focus:border-cyan-200 focus:outline-none focus:ring-2 focus:ring-cyan-400/40 disabled:opacity-60";
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-black to-slate-900 p-4 text-white">
-      {/* Header with Progress */}
+    <main className="min-h-screen flex flex-col items-center justify-center pt-24 pb-10 px-3 sm:px-4">
       <div className="w-full max-w-lg mb-4">
-        <div className="flex justify-between items-center mb-3">
-          <div className="text-sm font-semibold text-cyan-300">
-            Question {questionCount} of {TOTAL_QUESTIONS}
-          </div>
-          <div
-            className={`font-mono font-bold px-3 py-1 rounded-full border text-sm transition-colors ${
-              timer === null
-                ? "border-cyan-500/40 bg-slate-800 text-cyan-300"
-                : isTimeCritical
-                ? "border-red-500 bg-red-500/20 text-red-300 animate-pulse"
-                : isTimeWarning
-                ? "border-yellow-500 bg-yellow-500/20 text-yellow-300"
-                : "border-cyan-500/40 bg-slate-800 text-cyan-300"
-            }`}
-          >
-            ⏱️ {timer !== null ? `${timer}s` : "--"}
-          </div>
+        <div className="flex justify-between gap-3 mb-2 text-sm text-cyan-200">
+          <h1 className="font-bold">{MODE_LABEL[mode]} · <span className="capitalize">{level}</span></h1>
+          <span aria-label="Time remaining" className={remaining <= 5 ? "text-red-300 font-bold" : "font-mono"}>{question ? `${remaining}s` : "—"}</span>
         </div>
-
-        <div className="w-full h-2.5 bg-slate-800 rounded-full overflow-hidden border border-cyan-500/20">
-          <div
-            className="h-full bg-gradient-to-r from-cyan-400 to-blue-500 transition-all duration-300"
-            style={{ width: `${progressPercentage}%` }}
-          ></div>
+        <p className="mb-2 text-sm text-slate-300">Question {Math.min((session?.answeredQuestions ?? 0) + 1, 10)} of {session?.totalQuestions ?? 10}</p>
+        <div role="progressbar" aria-label="Round progress" aria-valuemin={0} aria-valuemax={10} aria-valuenow={session?.answeredQuestions ?? 0} className="h-2 rounded-full bg-slate-800 overflow-hidden">
+          <div className="h-full bg-gradient-to-r from-cyan-400 to-blue-500 transition-all" style={{ width: `${(session?.answeredQuestions ?? 0) * 10}%` }} />
         </div>
       </div>
-
-      {/* Main Game Board */}
-      <div className="w-full max-w-lg rounded-2xl border border-cyan-500/30 bg-slate-900/80 p-6 text-center shadow-[0_20px_45px_rgba(0,0,0,0.45)] relative">
-        {/* Score & Feedback Bar */}
-        <div className="flex items-center justify-between mb-6 px-2">
-          <div className="text-xl font-bold text-cyan-300">⭐ Score: {score}</div>
-          {feedback && (
-            <div
-              className={`text-sm font-bold px-3 py-1 rounded-full animate-bounce ${
-                feedback.type === "success"
-                  ? "bg-green-500/20 text-green-300 border border-green-500/50"
-                  : feedback.type === "warning"
-                  ? "bg-yellow-500/20 text-yellow-300 border border-yellow-500/50"
-                  : "bg-red-500/20 text-red-300 border border-red-500/50"
-              }`}
-            >
-              {feedback.text}
-            </div>
-          )}
-        </div>
-
-        {/* Error Messages */}
-        {questionError && (
-          <div className="p-3 mb-4 rounded-lg bg-red-500/20 border border-red-500 text-red-300 text-sm">
-            ❌ {questionError}
-          </div>
-        )}
-
-        {/* Carry/Borrow Row */}
-        {showCarryBorrow && carryRequiredMap.length > 0 && (
-          <div
-            className="mb-3 grid justify-center gap-2"
-            style={{ gridTemplateColumns: `repeat(${totalColumns}, 48px)` }}
-          >
-            <div key="carry-operator-spacer" className="h-9" />
-            {Array.from({ length: carryOffset }).map((_, index) => (
-              <div key={`carry-offset-${index}`} className="h-9" />
-            ))}
-            {carryMap.map((value, index) =>
-              carryRequiredMap[index] ? (
-                <button
-                  type="button"
-                  key={`carry-${index}`}
-                  onClick={() => {
-                    setActiveInput("carry");
-                    setSelectedCarryIndex(index);
-                  }}
-                  aria-label={`Set carry for column ${index + 1}`}
-                  className={`h-9 rounded-lg border-2 text-sm font-bold transition-all duration-200 ${
-                    selectedCarryIndex === index && activeInput === "carry"
-                      ? "border-cyan-200 bg-cyan-400 text-black shadow-[0_0_8px_rgba(34,211,238,0.5)]"
-                      : "border-yellow-400 bg-yellow-400/20 text-yellow-300 hover:bg-yellow-400/40"
-                  }`}
-                >
-                  {value || "C"}
-                </button>
-              ) : (
-                <div key={`carry-empty-${index}`} className="h-9" />
-              )
+      <section className="w-full max-w-lg rounded-2xl border border-cyan-500/30 bg-slate-900/90 p-4 sm:p-6 shadow-xl">
+        <p className="text-xl font-bold text-cyan-300 mb-2">Score: {session?.score ?? 0}</p>
+        <p role="status" className="min-h-12 text-sm text-cyan-100 mb-3">{phase === "loading" ? "Loading your round…" : phase === "submitting" ? "Checking your answer…" : phase === "ending" ? "Saving your round…" : feedback}</p>
+        {error && <div role="alert" className="rounded-lg border border-amber-400/50 bg-amber-500/10 p-3 mb-4 text-sm text-amber-100"><p>{error}</p>{phase === "error" && <button type="button" onClick={() => { if (retryRef.current) void runOperation(retryRef.current); }} className="btn-secondary mt-3">Retry Request</button>}</div>}
+        {question && <form onSubmit={(event) => { event.preventDefault(); submit(); }} aria-busy={phase === "submitting" || phase === "ending"}>
+          <fieldset disabled={!editable} className="min-w-0">
+            <legend className="sr-only">Solve the question</legend>
+            {mode === "fraction" ? (
+              <div className="space-y-5 mb-5">
+                <div className="flex items-center justify-center gap-5 text-3xl font-mono font-bold" aria-label={`Question: ${question.a}/${question.denominatorA} ${question.operatorSymbol} ${question.b}/${question.denominatorB}`}>
+                  <div className="text-center"><span className="block px-3">{question.a}</span><span className="block border-t-2 border-slate-200 px-3">{question.denominatorA}</span></div>
+                  <span className="text-cyan-300">{question.operatorSymbol}</span>
+                  <div className="text-center"><span className="block px-3">{question.b}</span><span className="block border-t-2 border-slate-200 px-3">{question.denominatorB}</span></div>
+                </div>
+                <div className="max-w-48 mx-auto">
+                  <label htmlFor="game-numerator" className="block text-sm text-slate-300 mb-1">Numerator</label>
+                  <input ref={numeratorRef} id="game-numerator" inputMode="numeric" autoComplete="off" maxLength={6} className={inputClass} value={numerator} onChange={inputChange(setNumerator)} onFocus={() => setActiveInput("num")} onKeyDown={(event) => { if (event.key === "/") { event.preventDefault(); denominatorRef.current?.focus(); } }} />
+                  <div className="border-t-2 border-slate-200 my-2" />
+                  <label htmlFor="game-denominator" className="block text-sm text-slate-300 mb-1">Denominator</label>
+                  <input ref={denominatorRef} id="game-denominator" inputMode="numeric" autoComplete="off" maxLength={6} className={inputClass} value={denominator} onChange={inputChange(setDenominator)} onFocus={() => setActiveInput("den")} />
+                </div>
+                <p className="text-xs text-center text-slate-400">Equivalent fractions are accepted. Press / to move to the denominator.</p>
+              </div>
+            ) : (
+              <div className="max-w-96 mx-auto mb-5">
+                {(mode === "add" || mode === "sub") && <>
+                  <p className="text-xs text-slate-300 mb-2">Mark each column where you {mode === "sub" ? "borrow" : "carry"} for full credit.</p>
+                  <div className="grid gap-1 sm:gap-2 mb-2" style={grid}>
+                    <span />{Array.from({ length: columns }, (_, index) => <button key={index} type="button" aria-label={`${mode === "sub" ? "Borrow" : "Carry"} for column ${index + 1}`} aria-pressed={carryMap[index] === "1"} onClick={() => {
+                      setActiveInput(`carry:${index}`);
+                      setCarryMap((current) => current.map((entry, position) => position === index ? entry === "1" ? "" : "1" : entry));
+                    }} className={`h-9 min-w-0 rounded-md border text-sm font-bold ${activeInput === `carry:${index}` ? "border-cyan-100 bg-cyan-400/25" : "border-amber-400/60 bg-amber-400/10 text-amber-200"}`}>{carryMap[index] || (mode === "sub" ? "B" : "C")}</button>)}
+                  </div>
+                </>}
+                <div className="grid gap-1 sm:gap-2 text-center font-mono text-2xl sm:text-3xl font-bold" style={grid} aria-label={`Question: ${question.a} ${question.operatorSymbol} ${question.b}`}>
+                  <span />{digits(question.a).map((digit, index) => <span key={`a-${index}`} className="py-1">{digit.trim()}</span>)}
+                  <span className="text-cyan-300 py-1">{question.operatorSymbol}</span>{digits(question.b).map((digit, index) => <span key={`b-${index}`} className="py-1">{digit.trim()}</span>)}
+                  <div className="col-span-full border-b-2 border-cyan-400 my-2" />
+                </div>
+                <label htmlFor="game-answer" className="block text-sm text-slate-300 mb-2">Your answer</label>
+                <input ref={answerRef} id="game-answer" inputMode="numeric" autoComplete="off" maxLength={6} className={inputClass} value={answer} onChange={inputChange(setAnswer)} onFocus={() => setActiveInput("answer")} />
+              </div>
             )}
-          </div>
-        )}
-
-        {/* Question Display */}
-        {mode === "fraction" ? (
-          <div className="mb-6 flex flex-col items-center justify-center gap-6">
-            <div className="inline-flex flex-col items-center justify-center gap-5 sm:flex-row sm:gap-6">
-              <div className="inline-block rounded-xl border border-cyan-500/20 bg-slate-800/60 px-5 py-4">
-                <div className="text-4xl font-mono font-bold">
-                  <div className="flex items-center justify-center gap-6">
-                    <div className="w-12 text-center">
-                      <div className="flex h-8 items-center justify-center text-2xl leading-none">
-                        {fractionQ ? fractionQ.a.n : ""}
-                      </div>
-                      <div className="flex h-8 items-center justify-center border-t-2 border-white text-2xl leading-none">
-                        {fractionQ ? fractionQ.a.d : ""}
-                      </div>
-                    </div>
-                    <div className="text-3xl text-cyan-300">
-                      {fractionQ ? fractionQ.operator : "+"}
-                    </div>
-                    <div className="w-12 text-center">
-                      <div className="flex h-8 items-center justify-center text-2xl leading-none">
-                        {fractionQ ? fractionQ.b.n : ""}
-                      </div>
-                      <div className="flex h-8 items-center justify-center border-t-2 border-white text-2xl leading-none">
-                        {fractionQ ? fractionQ.b.d : ""}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div className="text-5xl text-cyan-300 font-bold">=</div>
-              <div className="inline-flex flex-col items-center gap-3">
-                <div className="rounded-xl border border-cyan-400/40 bg-slate-800/80 px-5 py-4 shadow-[0_10px_30px_rgba(34,211,238,0.12)]">
-                  <div className="mb-3 text-center text-xs font-bold uppercase tracking-widest text-cyan-200">
-                    Your Answer
-                  </div>
-                  <div className="mx-auto flex w-24 flex-col items-center font-mono font-bold">
-                    <button
-                      type="button"
-                      aria-label="Enter numerator"
-                      aria-pressed={activeInput === "num"}
-                      className={`flex h-12 w-full items-center justify-center rounded-md border px-3 text-2xl leading-none transition-all ${
-                        activeInput === "num"
-                          ? "border-cyan-300 bg-cyan-400/20 text-cyan-100 shadow-[0_0_0_3px_rgba(34,211,238,0.18)]"
-                          : "border-transparent text-white hover:border-cyan-400/50 hover:bg-cyan-400/10"
-                      }`}
-                      onClick={() => setActiveInput("num")}
-                    >
-                      {fracNumInput || "_"}
-                    </button>
-                    <div className="my-1 w-full rounded-full border-t-2 border-white" />
-                    <button
-                      type="button"
-                      aria-label="Enter denominator"
-                      aria-pressed={activeInput === "den"}
-                      className={`flex h-12 w-full items-center justify-center rounded-md border px-3 text-2xl leading-none transition-all ${
-                        activeInput === "den"
-                          ? "border-cyan-300 bg-cyan-400/20 text-cyan-100 shadow-[0_0_0_3px_rgba(34,211,238,0.18)]"
-                          : "border-transparent text-white hover:border-cyan-400/50 hover:bg-cyan-400/10"
-                      }`}
-                      onClick={() => setActiveInput("den")}
-                    >
-                      {fracDenInput || "_"}
-                    </button>
-                  </div>
-                </div>
-                <div className="flex gap-2 text-[11px] font-bold uppercase tracking-wide">
-                  <button
-                    type="button"
-                    onClick={() => setActiveInput("num")}
-                    className={`rounded-full px-3 py-1 transition-all ${
-                      activeInput === "num"
-                        ? "bg-cyan-400 text-slate-950"
-                        : "bg-slate-700 text-slate-300"
-                    }`}
-                  >
-                    Numerator
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setActiveInput("den")}
-                    className={`rounded-full px-3 py-1 transition-all ${
-                      activeInput === "den"
-                        ? "bg-cyan-400 text-slate-950"
-                        : "bg-slate-700 text-slate-300"
-                    }`}
-                  >
-                    Denominator
-                  </button>
-                </div>
-              </div>
+            {formError && <p role="alert" className="text-red-200 text-sm mb-4">{formError}</p>}
+            <div className="max-w-xs mx-auto grid grid-cols-3 gap-2 mb-4">
+              {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((digit) => <button key={digit} type="button" onClick={() => enterDigit(digit)} className="rounded-lg border border-slate-600 bg-slate-800 py-2.5 text-lg font-bold hover:bg-cyan-500/25">{digit}</button>)}
+              <button type="button" onClick={deleteDigit} className="rounded-lg border border-slate-600 bg-slate-800 py-2.5 text-sm">Delete</button>
+              <button type="button" onClick={() => enterDigit(0)} className="rounded-lg border border-slate-600 bg-slate-800 py-2.5 text-lg font-bold">0</button>
+              <button type="button" onClick={clearInput} className="rounded-lg border border-slate-600 bg-slate-800 py-2.5 text-sm">Clear</button>
             </div>
-          </div>
-        ) : (
-          <div
-            className="grid justify-center gap-2 font-mono text-3xl font-bold mb-4"
-            style={{ gridTemplateColumns: `repeat(${totalColumns}, 48px)` }}
-          >
-            {/* Top row */}
-            <span className="invisible flex items-center justify-center h-12"> </span>
-            {topDigits.map((digit, index) => (
-              <span
-                key={`top-${index}`}
-                className="flex items-center justify-center h-12 text-slate-100"
-              >
-                {digit === " " ? "" : digit}
-              </span>
-            ))}
-
-            {/* Bottom row with operator */}
-            <span
-              className="text-cyan-300 flex items-center justify-center h-12"
-              aria-hidden
-            >
-              {operatorSymbol}
-            </span>
-            {bottomDigits.map((digit, index) => (
-              <span
-                key={`bottom-${index}`}
-                className="flex items-center justify-center h-12 text-slate-100"
-              >
-                {digit === " " ? "" : digit}
-              </span>
-            ))}
-
-            {/* Separator line */}
-            <div className="col-span-full border-b-2 border-cyan-400 my-1" />
-
-            {/* Answer row */}
-            <span className="invisible flex items-center justify-center h-12"> </span>
-            {Array.from({ length: answerOffset }).map((_, index) => (
-              <span key={`ans-spacer-${index}`} className="h-12" />
-            ))}
-            {answerDigits.map((digit, index) => (
-              <div
-                key={`answer-digit-${index}`}
-                className={`flex h-12 items-center justify-center rounded-lg border-2 text-2xl font-bold transition-all duration-200 ${
-                  digit !== ""
-                    ? "border-cyan-400 bg-cyan-950/70 text-cyan-300 shadow-[0_0_12px_rgba(34,211,238,0.35)]"
-                    : "border-cyan-500/40 bg-slate-800/80 text-cyan-200/40"
-                }`}
-              >
-                {digit || "_"}
-              </div>
-            ))}
-          </div>
-        )}
-
-        <div className="my-4 border-b border-cyan-500/20" />
-
-        {/* Number Pad */}
-        <div className="mx-auto mb-6 grid w-full max-w-xs grid-cols-3 gap-2">
-          {[1, 2, 3, 4, 5, 6, 7, 8, 9, 0].map((digit) => (
-            <button
-              type="button"
-              key={digit}
-              onClick={() => handleDigit(digit)}
-              className="rounded-lg bg-slate-800 border border-slate-700 py-3 text-lg font-semibold text-white transition-all duration-200 hover:-translate-y-1 hover:bg-cyan-500 hover:text-slate-950 hover:shadow-[0_8px_20px_rgba(34,211,238,0.35)] active:scale-95"
-            >
-              {digit}
-            </button>
-          ))}
-        </div>
-
-        {/* Action Buttons */}
-        <div className="space-y-3">
-          <button
-            type="button"
-            onClick={() => handleSubmit(false)}
-            className="w-full rounded-lg bg-gradient-to-r from-cyan-500 to-blue-500 px-4 py-3 font-bold text-slate-950 transition-all duration-200 hover:-translate-y-1 hover:shadow-[0_8px_20px_rgba(34,211,238,0.35)] active:scale-98"
-          >
-            ✓ Submit Answer
-          </button>
-
-          <div className="grid grid-cols-3 gap-2">
-            <button
-              type="button"
-              onClick={handleDelete}
-              className="rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 font-semibold text-slate-200 transition-all duration-200 hover:border-cyan-300 hover:text-cyan-100 hover:bg-slate-700"
-            >
-              ← Delete
-            </button>
-            <button
-              type="button"
-              onClick={handleClear}
-              className="rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 font-semibold text-slate-200 transition-all duration-200 hover:border-cyan-300 hover:text-cyan-100 hover:bg-slate-700"
-            >
-              ⟲ Clear
-            </button>
-            <button
-              type="button"
-              onClick={handleNext}
-              className="rounded-lg border border-cyan-400/60 bg-cyan-500/15 px-3 py-2 font-semibold text-cyan-100 transition-all duration-200 hover:bg-cyan-500/25"
-            >
-              Next →
-            </button>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => finalizeGame(score)}
-            className="w-full rounded-lg border border-red-400/50 bg-red-500/10 px-4 py-2 font-bold text-red-200 transition-all duration-200 hover:bg-red-500/20"
-          >
-            🛑 End Game
-          </button>
-        </div>
-      </div>
-    </div>
+            <button type="submit" className="btn-primary w-full">Submit Answer</button>
+            <button type="button" onClick={() => submit("skip")} className="btn-secondary w-full mt-3">Skip Question</button>
+          </fieldset>
+          <button type="button" disabled={phase !== "ready"} onClick={() => void runOperation({ kind: "end", sessionId: session.id })} className="w-full mt-3 rounded-lg border border-red-400/50 px-4 py-2.5 text-red-200 font-semibold disabled:opacity-50">End Game</button>
+        </form>}
+      </section>
+      <p className="max-w-lg text-center text-xs text-slate-400 mt-4">Use the keypad or your keyboard. Enter submits, Backspace deletes, and Esc clears. End Game saves an unfinished round to history.</p>
+    </main>
   );
-};
-
-export default GameBoard;
+}

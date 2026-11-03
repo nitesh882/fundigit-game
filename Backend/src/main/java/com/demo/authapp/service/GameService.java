@@ -1,212 +1,104 @@
 package com.demo.authapp.service;
-
-import com.demo.authapp.dto.game.GameQuestionResponse;
-import com.demo.authapp.dto.game.GameSubmitRequest;
-import com.demo.authapp.dto.game.GameSubmitResponse;
+import com.demo.authapp.config.ApiException;
+import com.demo.authapp.dto.game.SessionDtos.QuestionView;
+import com.demo.authapp.model.QuestionAttempt;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
-
-import java.util.ArrayList;
-import java.util.List;
+import java.time.Instant;
+import java.util.*;
 import java.util.concurrent.ThreadLocalRandom;
 
 @Service
 public class GameService {
-
-    public GameQuestionResponse generateQuestion(String mode, String level) {
-        String resolvedMode = normalizeMode(mode);
-        String resolvedLevel = normalizeLevel(level);
-
-        int[] operands = randomOperands(resolvedMode, resolvedLevel);
-        int a = operands[0];
-        int b = operands[1];
-
-        int correctAnswer = correctAnswer(resolvedMode, a, b);
-        int answerLength = String.valueOf(correctAnswer).length();
-        int questionColumns = Math.max(String.valueOf(a).length(), String.valueOf(b).length());
-
-        List<Boolean> carryRequiredMap = carryRequiredMap(resolvedMode, a, b, questionColumns);
-
-        return new GameQuestionResponse(
-                a,
-                b,
-                resolvedMode,
-                resolvedLevel,
-                operatorSymbol(resolvedMode),
-                answerLength,
-                questionColumns,
-                carryRequiredMap,
-                timeLimitSeconds(resolvedLevel)
-        );
+    public static final int TOTAL_QUESTIONS = 10;
+    public String mode(String value) {
+        if (value == null || !Set.of("add", "sub", "mul", "div", "fraction").contains(value))
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Choose a valid game mode.");
+        return value;
     }
-
-    public GameSubmitResponse submit(GameSubmitRequest request) {
-        String mode = normalizeMode(request.mode());
-        String level = normalizeLevel(request.level());
-
-        int expected = correctAnswer(mode, request.a(), request.b());
-        boolean answerCorrect = parseAnswerCorrect(request.answerText(), expected);
-
-        int columns = Math.max(String.valueOf(request.a()).length(), String.valueOf(request.b()).length());
-        List<Boolean> requiredMap = carryRequiredMap(mode, request.a(), request.b(), columns);
-        boolean carryCorrect = validateCarry(requiredMap, request.carryMap());
-
-        int earnedPoints = 0;
-        if (!request.timeout() && answerCorrect) {
-            earnedPoints = (requiredMap.isEmpty() || carryCorrect) ? 10 : 8;
-        }
-        return new GameSubmitResponse(answerCorrect, carryCorrect, earnedPoints);
+    public String level(String value) {
+        if (value == null || !Set.of("easy", "medium", "hard").contains(value))
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Choose a valid difficulty.");
+        return value;
     }
-
-    private static String normalizeMode(String mode) {
-        if (mode == null) return "add";
-        return switch (mode.trim().toLowerCase()) {
-            case "add", "addition" -> "add";
-            case "sub", "subtraction" -> "sub";
-            case "mul", "multiplication" -> "mul";
-            case "div", "division" -> "div";
-            default -> "add";
-        };
+    public String fractionOperations() {
+        List<Character> operations = new ArrayList<>(List.of('+', '+', '+', '+', '+', '-', '-', '-', '-', '-'));
+        Collections.shuffle(operations);
+        StringBuilder result = new StringBuilder();
+        operations.forEach(result::append);
+        return result.toString();
     }
-
-    private static String normalizeLevel(String level) {
-        if (level == null) return "medium";
-        return switch (level.trim().toLowerCase()) {
-            case "easy" -> "easy";
-            case "medium" -> "medium";
-            case "hard" -> "hard";
-            default -> "medium";
-        };
-    }
-
-    private static int timeLimitSeconds(String level) {
-        return switch (level) {
-            case "easy" -> 30;
-            case "medium" -> 20;
-            case "hard" -> 10;
-            default -> 20;
-        };
-    }
-
-    private static int rangeByLevel(String level) {
-        return switch (level) {
-            case "easy" -> 9;
-            case "medium" -> 99;
-            default -> 999;
-        };
-    }
-
-    private static String operatorSymbol(String mode) {
-        return switch (mode) {
-            case "add" -> "+";
-            case "sub" -> "-";
-            case "mul" -> "×";
-            case "div" -> "÷";
-            default -> "?";
-        };
-    }
-
-    private static int correctAnswer(String mode, int a, int b) {
-        return switch (mode) {
-            case "add" -> a + b;
-            case "sub" -> a - b;
-            case "mul" -> a * b;
-            case "div" -> b == 0 ? 0 : Math.floorDiv(a, b);
-            default -> 0;
-        };
-    }
-
-    private static int[] randomOperands(String mode, String level) {
-        int maxValue = rangeByLevel(level);
-        int a = ThreadLocalRandom.current().nextInt(1, maxValue + 1);
-        int b = ThreadLocalRandom.current().nextInt(1, maxValue + 1);
-
-        if ("sub".equals(mode) && a < b) {
-            int tmp = a;
-            a = b;
-            b = tmp;
-        }
-
-        if ("div".equals(mode)) {
-            b = ThreadLocalRandom.current().nextInt(1, 10); // 1..9
-            int maxMultiplier = Math.max(2, maxValue / b);
-            int multiplier = ThreadLocalRandom.current().nextInt(1, maxMultiplier + 1);
-            a = b * multiplier;
-        }
-
-        return new int[]{a, b};
-    }
-
-    private static List<Boolean> carryRequiredMap(String mode, int a, int b, int columns) {
-        if (!"add".equals(mode) && !"sub".equals(mode)) return List.of();
-
-        int[] digits1 = leftPadDigits(a, columns);
-        int[] digits2 = leftPadDigits(b, columns);
-
-        List<Boolean> required = new ArrayList<>(columns);
-        for (int i = 0; i < columns; i += 1) required.add(false);
-
-        if ("add".equals(mode)) {
-            int carryIn = 0;
-            for (int i = columns - 1; i >= 0; i -= 1) {
-                int sum = digits1[i] + digits2[i] + carryIn;
-                int carryOut = sum >= 10 ? 1 : 0;
-                required.set(i, carryOut == 1);
-                carryIn = carryOut;
+    public QuestionAttempt generate(String mode, String level, int number, String fractionOperations, Instant now) {
+        QuestionAttempt q = new QuestionAttempt();
+        q.setId(UUID.randomUUID().toString());
+        q.setNumber(number);
+        int seconds = switch (level) { case "easy" -> 30; case "medium" -> 20; default -> 10; };
+        int max = switch (level) { case "easy" -> 9; case "medium" -> 99; default -> 999; };
+        int a = random(1, max), b = random(1, max);
+        String symbol = switch (mode) { case "add" -> "+"; case "sub" -> "-"; case "mul" -> "×"; case "div" -> "÷"; default -> "+"; };
+        if (mode.equals("sub") && a < b) { int temp = a; a = b; b = temp; }
+        if (mode.equals("div")) { b = random(1, Math.min(9, max)); a = b * random(1, max / b); }
+        if (mode.equals("fraction")) {
+            int denominatorMax = switch (level) { case "easy" -> 6; case "medium" -> 12; default -> 20; };
+            int d1 = random(2, denominatorMax), d2 = random(2, denominatorMax);
+            a = random(1, d1 - 1); b = random(1, d2 - 1);
+            symbol = String.valueOf(fractionOperations.charAt(number - 1));
+            if (symbol.equals("-") && a * d2 < b * d1) {
+                int t = a; a = b; b = t; t = d1; d1 = d2; d2 = t;
             }
-        } else {
-            int borrowIn = 0;
-            for (int i = columns - 1; i >= 0; i -= 1) {
-                int top = digits1[i] - borrowIn;
-                boolean needsBorrow = top < digits2[i];
-                required.set(i, needsBorrow);
-                borrowIn = needsBorrow ? 1 : 0;
-            }
+            q.setDenominatorA(d1); q.setDenominatorB(d2); seconds += 10;
         }
-
-        return required;
+        q.setA(a); q.setB(b); q.setOperatorSymbol(symbol);
+        q.setTimeLimitSeconds(seconds); q.setExpiresAt(now.plusSeconds(seconds));
+        return q;
     }
-
-    private static int[] leftPadDigits(int value, int columns) {
-        String text = String.valueOf(value);
-        if (text.length() < columns) {
-            text = "0".repeat(columns - text.length()) + text;
-        }
-        int[] digits = new int[columns];
-        for (int i = 0; i < columns; i += 1) {
-            char c = text.charAt(i);
-            digits[i] = Character.digit(c, 10);
-        }
-        return digits;
+    private static int random(int min, int max) { return ThreadLocalRandom.current().nextInt(min, max + 1); }
+    public int expected(QuestionAttempt q) {
+        return switch (q.getOperatorSymbol()) {
+            case "+" -> q.getA() + q.getB(); case "-" -> q.getA() - q.getB();
+            case "×" -> q.getA() * q.getB(); case "÷" -> q.getA() / q.getB();
+            default -> throw new IllegalStateException("Unsupported operator");
+        };
     }
-
-    private static boolean parseAnswerCorrect(String answerText, int expected) {
-        if (answerText == null) return false;
-        String trimmed = answerText.trim();
-        if (trimmed.isEmpty()) return false;
-        try {
-            int entered = Integer.parseInt(trimmed);
-            return entered == expected;
-        } catch (NumberFormatException ex) {
-            return false;
+    public boolean answerCorrect(QuestionAttempt q, String text) {
+        if (q.getDenominatorA() != null) {
+            if (text == null || !text.matches("[0-9]{1,9}/[0-9]{1,9}"))
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Enter both a numerator and a nonzero denominator.");
+            String[] parts = text.split("/");
+            long n = Long.parseLong(parts[0]), d = Long.parseLong(parts[1]);
+            if (d == 0) throw new ApiException(HttpStatus.BAD_REQUEST, "The denominator cannot be zero.");
+            long expectedN = (long) q.getA() * q.getDenominatorB()
+                    + (q.getOperatorSymbol().equals("-") ? -1 : 1) * (long) q.getB() * q.getDenominatorA();
+            long expectedD = (long) q.getDenominatorA() * q.getDenominatorB();
+            return n * expectedD == expectedN * d;
         }
+        if (text == null || !text.matches("[0-9]{1,9}"))
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Enter a whole-number answer.");
+        return Long.parseLong(text) == expected(q);
     }
-
-    private static boolean validateCarry(List<Boolean> requiredMap, List<String> carryMap) {
-        if (requiredMap == null || requiredMap.isEmpty()) return true;
-        if (carryMap == null || carryMap.isEmpty()) return false;
-
-        int size = Math.min(requiredMap.size(), carryMap.size());
-        for (int i = 0; i < size; i += 1) {
-            if (!Boolean.TRUE.equals(requiredMap.get(i))) continue;
-            String value = carryMap.get(i);
-            if (value == null) return false;
-            if (!"1".equals(value.trim())) return false;
+    public List<Boolean> carryMap(QuestionAttempt q) {
+        if (q.getDenominatorA() != null || (!q.getOperatorSymbol().equals("+") && !q.getOperatorSymbol().equals("-"))) return List.of();
+        int columns = Math.max(String.valueOf(q.getA()).length(), String.valueOf(q.getB()).length());
+        List<Boolean> result = new ArrayList<>(Collections.nCopies(columns, false));
+        int a = q.getA(), b = q.getB(), carry = 0;
+        for (int i = columns - 1; i >= 0; i--) {
+            boolean needed = q.getOperatorSymbol().equals("+") ? a % 10 + b % 10 + carry >= 10 : a % 10 - carry < b % 10;
+            result.set(i, needed); carry = needed ? 1 : 0; a /= 10; b /= 10;
         }
-
-        for (int i = size; i < requiredMap.size(); i += 1) {
-            if (Boolean.TRUE.equals(requiredMap.get(i))) return false;
+        return result;
+    }
+    public boolean carryCorrect(QuestionAttempt q, List<String> entered) {
+        List<Boolean> required = carryMap(q);
+        if (required.isEmpty()) return true;
+        for (int i = 0; i < required.size(); i++) {
+            String value = entered != null && i < entered.size() && entered.get(i) != null ? entered.get(i).trim() : "";
+            if (required.get(i) ? !value.equals("1") : !(value.isEmpty() || value.equals("0"))) return false;
         }
-
-        return true;
+        return entered == null || entered.size() <= required.size();
+    }
+    public QuestionView view(QuestionAttempt q) {
+        int columns = Math.max(String.valueOf(q.getA()).length(), String.valueOf(q.getB()).length());
+        return new QuestionView(q.getId(), q.getA(), q.getB(), q.getDenominatorA(), q.getDenominatorB(),
+                q.getOperatorSymbol(), columns, q.getTimeLimitSeconds(), q.getExpiresAt());
     }
 }

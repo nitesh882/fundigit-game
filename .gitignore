@@ -36,3 +36,14 @@ desktop.ini
 *.class
 *.jar
 !Backend/.mvn/wrapper/maven-wrapper.properties
+
+# Local data and verification artifacts
+Backend/data/
+Frontend/coverage/
+Frontend/output/
+Frontend/test-results/
+Frontend/playwright-report/
+output/
+*.mv.db
+*.trace.db
+!**/.env.example

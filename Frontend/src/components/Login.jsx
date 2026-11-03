@@ -1,85 +1,65 @@
-import { useState } from "react";
-import { useNavigate, Link } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { apiRequest } from "@/lib/apiClient";
 
-const Login = () => {
+export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [pending, setPending] = useState(false);
+  const inFlight = useRef(null);
   const navigate = useNavigate();
-  const { login } = useAuth();
+  const location = useLocation();
+  const { login, isAuthenticated } = useAuth();
+  const requestedPath = location.state?.from;
+  const destination = typeof requestedPath === "string" && (requestedPath.startsWith("/game") || requestedPath === "/leaderboard") ? requestedPath : "/game";
 
-  const handleLogin = async (e) => {
-    e.preventDefault();
+  useEffect(() => () => inFlight.current?.abort(), []);
+
+  const handleLogin = async (event) => {
+    event.preventDefault();
+    if (inFlight.current) return;
+    const controller = new AbortController();
+    inFlight.current = controller;
+    setPending(true);
     setError("");
-
     try {
-      console.log("Sending login request...", { email });
       const { data } = await apiRequest("/api/auth/login", {
-        method: "POST",
-        body: JSON.stringify({ email, password }),
+        method: "POST", signal: controller.signal,
+        body: JSON.stringify({ email: email.trim().toLowerCase(), password }),
       });
-
+      if (controller.signal.aborted) return;
+      if (!data?.token || !data?.user) throw new Error("The server returned an invalid login response.");
       login(data.user, data.token);
-      navigate("/game");
-    } catch (err) {
-      setError(err.message || "Failed to connect to server");
+      navigate(destination, { replace: true });
+    } catch (failure) {
+      if (!controller.signal.aborted) setError(failure.message || "Unable to connect. Please try again.");
+    } finally {
+      if (!controller.signal.aborted) setPending(false);
+      if (inFlight.current === controller) inFlight.current = null;
     }
   };
 
+  if (isAuthenticated) return <Navigate to={destination} replace />;
   return (
-    <div className="min-h-screen flex items-center justify-center pt-20 px-4">
+    <main className="min-h-screen flex items-center justify-center pt-24 pb-10 px-4">
       <div className="card-container">
-        <h2 className="text-3xl font-bold text-center mb-8 bg-gradient-to-r from-gaming-primary to-gaming-secondary text-transparent bg-clip-text">
-          Welcome Back
-        </h2>
-
-        {error && (
-          <div className="bg-red-500/20 border border-red-500 text-red-200 p-3 rounded-lg mb-6 text-center text-sm">
-            {error}
-          </div>
-        )}
-
-        <form onSubmit={handleLogin} className="space-y-6">
+        <h1 className="text-3xl font-bold text-center mb-8 text-cyan-300">Welcome Back</h1>
+        {error && <p role="alert" className="bg-red-500/15 border border-red-400/50 text-red-200 p-3 rounded-lg mb-6">{error}</p>}
+        <form onSubmit={handleLogin} className="space-y-6" aria-busy={pending}>
           <div>
-            <label className="block text-gray-400 text-sm mb-2">Email Address</label>
-            <input
-              type="email"
-              className="input-field text-left"
-              placeholder="gamer@example.com"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-            />
+            <label htmlFor="login-email" className="block text-slate-300 text-sm mb-2">Email Address</label>
+            <input id="login-email" name="email" type="email" autoComplete="username" maxLength={254} className="input-field text-left" value={email} onChange={(event) => setEmail(event.target.value)} required disabled={pending} />
           </div>
-
           <div>
-            <label className="block text-gray-400 text-sm mb-2">Password</label>
-            <input
-              type="password"
-              className="input-field text-left"
-              placeholder="••••••••"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-            />
+            <label htmlFor="login-password" className="block text-slate-300 text-sm mb-2">Password</label>
+            <input id="login-password" name="password" type="password" autoComplete="current-password" className="input-field text-left" value={password} onChange={(event) => setPassword(event.target.value)} required disabled={pending} />
           </div>
-
-          <button type="submit" className="w-full btn-primary mt-4">
-            Start Game
-          </button>
+          <button type="submit" disabled={pending} className="w-full btn-primary">{pending ? "Signing In…" : "Start Game"}</button>
         </form>
-
-        <p className="mt-6 text-center text-gray-400 text-sm">
-          New player?{" "}
-          <Link to="/signup" className="text-gaming-primary hover:text-gaming-secondary font-bold">
-            Create Account
-          </Link>
-        </p>
+        <p className="mt-6 text-center text-slate-300 text-sm">New player? <Link to="/signup" className="text-cyan-300 font-bold">Create Account</Link></p>
       </div>
-    </div>
+    </main>
   );
-};
-
-export default Login;
+}
